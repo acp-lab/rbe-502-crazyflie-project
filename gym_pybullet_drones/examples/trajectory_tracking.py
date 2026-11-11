@@ -1,185 +1,184 @@
-"""Script demonstrating the joint use of simulation and control.
+"""Trajectory tracking with the geometric controller.
 
-The simulation is run by a `CtrlAviary` environment.
-The control is given by the PID implementation in `DSLPIDControl`.
+RBE 502 Quadrotor Control Project. The simulation is run by a `CtrlAviary`
+environment, and the control is given by your `GeometricControl`.
 
 Example
 -------
-In a terminal, run as:
+From the `examples` folder, run:
 
-    $ python trajectory_tracking.py
+    $ python trajectory_tracking.py --traj circle
+    $ python trajectory_tracking.py --traj diamond
+    $ python trajectory_tracking.py --traj diamond --traj_duration 6 --gui false
 
-Notes
------
-The drones move along cicular or diamond trajectories 
-in the space.
+The script prints the RMSE of the position error, saves the log and the
+figures to `results/`, and shows the figures.
 
 """
 import os
 import time
 import argparse
 from datetime import datetime
-import pdb
-import math
-import random
+
 import numpy as np
 import pybullet as p
-import matplotlib.pyplot as plt
 
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
-from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
-from gym_pybullet_drones.utils.Logger import Logger
+from gym_pybullet_drones.control.GeometricControl import GeometricControl
+from gym_pybullet_drones.utils.TrackingLogger import TrackingLogger
 from gym_pybullet_drones.utils.utils import sync, str2bool
-
 from gym_pybullet_drones.trajectory import circle, diamond
 
-DEFAULT_DRONES = DroneModel("cf2x")
-DEFAULT_NUM_DRONES = 1
-DEFAULT_PHYSICS = Physics("pyb")
+#### Trajectories: name -> (function of (t, duration), default duration [s]) ####
+TRAJECTORIES = {
+    'circle': (circle.circle, 15.0),
+    'diamond': (diamond.diamond, 8.0),
+}
+
+#### Simulation settings (do not change; used for grading) ######################
+SIMULATION_FREQ_HZ = 1000
+CONTROL_FREQ_HZ = 200
+HOVER_SEC = 2.0     # hover at the final point after the trajectory ends
+
+#### Controller evaluation: (upper bound on the RMSE of the position error norm [m], score)
+EVALUATION_TIERS = [(0.05, 100), (0.10, 90), (0.15, 80), (0.20, 60)]
+
+DEFAULT_TRAJ = 'circle'
 DEFAULT_GUI = True
-DEFAULT_RECORD_VISION = False
 DEFAULT_PLOT = True
-DEFAULT_USER_DEBUG_GUI = False
-DEFAULT_OBSTACLES = False
-DEFAULT_SIMULATION_FREQ_HZ = 240
-DEFAULT_CONTROL_FREQ_HZ = 48
-DEFAULT_DURATION_SEC = 10
+DEFAULT_RECORD_VIDEO = False
 DEFAULT_OUTPUT_FOLDER = 'results'
-DEFAULT_COLAB = False
 
-def run(
-        drone=DEFAULT_DRONES,
-        num_drones=DEFAULT_NUM_DRONES,
-        physics=DEFAULT_PHYSICS,
+
+def evaluation_score(rmse_norm):
+    """Returns the controller evaluation score for one trajectory, as in the project statement."""
+    if not np.isfinite(rmse_norm):
+        return 0
+    for i, (bound, score) in enumerate(EVALUATION_TIERS):
+        is_last = i == len(EVALUATION_TIERS) - 1
+        if rmse_norm < bound or (is_last and rmse_norm <= bound):
+            return score
+    return 0
+
+
+def run(traj=DEFAULT_TRAJ,
+        traj_duration=None,
         gui=DEFAULT_GUI,
-        record_video=DEFAULT_RECORD_VISION,
         plot=DEFAULT_PLOT,
-        user_debug_gui=DEFAULT_USER_DEBUG_GUI,
-        obstacles=DEFAULT_OBSTACLES,
-        simulation_freq_hz=DEFAULT_SIMULATION_FREQ_HZ,
-        control_freq_hz=DEFAULT_CONTROL_FREQ_HZ,
-        duration_sec=DEFAULT_DURATION_SEC,
-        output_folder=DEFAULT_OUTPUT_FOLDER,
-        colab=DEFAULT_COLAB
+        record_video=DEFAULT_RECORD_VIDEO,
+        output_folder=DEFAULT_OUTPUT_FOLDER
         ):
-    #### Initialize the simulation #############################
-    H = .1
-    H_STEP = .05
-    R = .3
-    INIT_XYZS = np.array([[R*np.cos((i/6)*2*np.pi+np.pi/2), R*np.sin((i/6)*2*np.pi+np.pi/2)-R, H+i*H_STEP] for i in range(num_drones)])
-    INIT_RPYS = np.array([[0, 0,  i * (np.pi/2)/num_drones] for i in range(num_drones)])
+    """Tracks a trajectory and returns the RMSE of the position error.
 
-    #### Initialize a circular trajectory ######################
-    PERIOD = 8
-    NUM_WP = control_freq_hz*PERIOD
-    TARGET_POS = np.zeros((NUM_WP,3))
-    for i in range(NUM_WP):
-        TARGET_POS[i, :] = R*np.cos((i/NUM_WP)*(2*np.pi)+np.pi/2)+INIT_XYZS[0, 0], R*np.sin((i/NUM_WP)*(2*np.pi)+np.pi/2)-R+INIT_XYZS[0, 1], H
-    wp_counters = np.array([0])
+    Parameters
+    ----------
+    traj : str
+        'circle' or 'diamond'.
+    traj_duration : float, optional
+        Total duration of the trajectory [s]. Defaults to the default duration of the trajectory.
+    gui : bool
+        Whether to show the PyBullet GUI.
+    plot : bool
+        Whether to show the figures. The figures are saved in both cases.
+    record_video : bool
+        Whether to record a video of the simulation.
+    output_folder : str
+        Folder where the log and the figures are saved.
 
-    #### Create the environment ################################
-    env = CtrlAviary(drone_model=drone,
-                        num_drones=num_drones,
-                        initial_xyzs=INIT_XYZS,
-                        initial_rpys=INIT_RPYS,
-                        physics=physics,
-                        neighbourhood_radius=10,
-                        pyb_freq=simulation_freq_hz,
-                        ctrl_freq=control_freq_hz,
-                        gui=gui,
-                        record=record_video,
-                        obstacles=obstacles,
-                        user_debug_gui=user_debug_gui
-                        )
+    Returns
+    -------
+    dict
+        RMSE of each component of the position error and of its norm [m].
 
-    #### Obtain the PyBullet Client ID from the environment ####
-    PYB_CLIENT = env.getPyBulletClient()
+    """
+    if traj not in TRAJECTORIES:
+        raise ValueError(f"Unknown trajectory '{traj}'. Choose from {list(TRAJECTORIES)}.")
+    traj_fn, default_duration = TRAJECTORIES[traj]
+    duration = default_duration if traj_duration is None else float(traj_duration)
+    if traj == 'circle' and duration != default_duration:
+        print(f"[WARNING] circle.py does not support custom durations yet; it always runs for {default_duration:g} s.")
+        duration = default_duration
 
-    #### Initialize the logger #################################
-    logger = Logger(logging_freq_hz=control_freq_hz,
-                    num_drones=num_drones,
-                    output_folder=output_folder,
-                    colab=colab
-                    )
+    def desired_state(t):
+        return traj_fn(t, duration)
 
-    #### Initialize the controllers ############################
-    if drone in [DroneModel.CF2X, DroneModel.CF2P]:
-        ctrl = [DSLPIDControl(drone_model=drone) for i in range(num_drones)]
+    ctrl = GeometricControl(drone_model=DroneModel.CF2X)
+    logger = TrackingLogger(traj_name=traj, traj_duration=duration)
 
-    #### Run the simulation ####################################
-    action = np.zeros((num_drones,4))
-    START = time.time()
-    elapsed = 0
-    for i in range(0, int(duration_sec*env.CTRL_FREQ)):
+    #### Create the environment, with the quadrotor at rest at the start of the trajectory.
+    #### A trajectory that starts on the ground (z = 0) starts with the quadrotor resting
+    #### on the ground, since its collision body cannot be spawned below the ground plane.
+    init_pos = np.array(desired_state(0.0)['pos'], dtype=float)
+    rest_height = ctrl._getURDFParameter('length') / 2 - ctrl._getURDFParameter('collision_z_offset')
+    init_pos[2] = max(init_pos[2], rest_height)
+    env = CtrlAviary(drone_model=DroneModel.CF2X,
+                     num_drones=1,
+                     initial_xyzs=init_pos.reshape(1, 3),
+                     initial_rpys=np.zeros((1, 3)),
+                     physics=Physics.PYB,
+                     pyb_freq=SIMULATION_FREQ_HZ,
+                     ctrl_freq=CONTROL_FREQ_HZ,
+                     gui=gui,
+                     record=record_video
+                     )
+    obs, _ = env.reset()
 
-        #### Step the simulation ###################################
-        obs, reward, terminated, truncated, info = env.step(action)
+    #### Draw the desired path in the GUI ##########################################
+    if gui:
+        path = np.array([desired_state(t)['pos'] for t in np.linspace(0, duration, 200)])
+        for k in range(len(path) - 1):
+            p.addUserDebugLine(path[k], path[k + 1], lineColorRGB=[1, 0, 0], lineWidth=2,
+                               physicsClientId=env.getPyBulletClient())
 
-        des_st = circle.circle(elapsed)
-        # des_st = diamond.diamond(elapsed)
-        pos = des_st["pos"]
-        vel = des_st["vel"]
-        acc = des_st["acc"]
-        #### Compute control for the current way point #############
-        for j in range(num_drones):
-            action[j, :], _, des_rpy = ctrl[j].computeControlFromState(control_timestep=env.CTRL_TIMESTEP,
-                                                                    state=obs[j],
-                                                                    target_pos=pos,
-                                                                    target_vel=vel,
-                                                                    target_rpy=INIT_RPYS[j, :],
-                                                                    target_acc=acc
-                                                                    )
-        #### Go to the next way point and loop #####################
-        for j in range(num_drones):
-            wp_counters[j] = wp_counters[j] + 1 if wp_counters[j] < (NUM_WP-1) else 0
-
-        #### Log the simulation ####################################
-        for j in range(num_drones):
-            logger.log(drone=j,
-                       timestamp=i/env.CTRL_FREQ,
-                       state=obs[j],
-                       des_state=np.hstack([pos, vel, des_rpy, np.array([0, 0, 0])]),
-                       control=np.hstack([pos, INIT_RPYS[j, :], np.zeros(6)])
-                       )
-
-        #### Printout ##############################################
-        env.render()
-
-        #### Sync the simulation ###################################
+    #### Run the simulation ########################################################
+    num_steps = int(round((duration + HOVER_SEC) * env.CTRL_FREQ))
+    start = time.time()
+    for i in range(num_steps):
+        t = i * env.CTRL_TIMESTEP
+        des = desired_state(t)
+        rpm, info = ctrl.computeControlFromState(state=obs[0],
+                                                 target_pos=des['pos'],
+                                                 target_vel=des['vel'],
+                                                 target_acc=des['acc'],
+                                                 target_yaw=des['yaw']
+                                                 )
+        logger.log(t, obs[0], des, info, rpm)
+        obs, _, _, _, _ = env.step(rpm.reshape(1, 4))
         if gui:
-            sync(i, START, env.CTRL_TIMESTEP)
-        
-        elapsed = elapsed + 1/env.CTRL_FREQ
-
-    #### Close the environment #################################
+            sync(i, start, env.CTRL_TIMESTEP)
     env.close()
 
-    #### Save the simulation results ###########################
-    # logger.save()
-    # logger.save_as_csv("pid") # Optional CSV save
+    #### Report and save the results ###############################################
+    rmse = logger.rmse()
+    print(f"\nTrajectory: {traj}, duration: {duration:g} s")
+    print(f"RMSE [m]: x = {rmse['x']:.4f}, y = {rmse['y']:.4f}, z = {rmse['z']:.4f}, "
+          f"position error norm = {rmse['norm']:.4f}")
+    if duration == default_duration:
+        print(f"Controller evaluation score for this trajectory: {evaluation_score(rmse['norm'])}")
 
-    #### Plot the simulation results ###########################
-    if plot:
-        logger.plot()
+    run_folder = os.path.join(output_folder,
+                              f"{traj}_{duration:g}s_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    log_path = logger.save(run_folder)
+    logger.plot(folder=run_folder, show=plot)
+    print(f"Log and figures saved to {os.path.dirname(os.path.abspath(log_path))}")
+    return rmse
 
 
 if __name__ == "__main__":
-    #### Define and parse (optional) arguments for the script ##
-    parser = argparse.ArgumentParser(description='Helix flight script using CtrlAviary and DSLPIDControl')
-    parser.add_argument('--drone',              default=DEFAULT_DRONES,     type=DroneModel,    help='Drone model (default: CF2X)', metavar='', choices=DroneModel)
-    parser.add_argument('--num_drones',         default=DEFAULT_NUM_DRONES,          type=int,           help='Number of drones (default: 3)', metavar='')
-    parser.add_argument('--physics',            default=DEFAULT_PHYSICS,      type=Physics,       help='Physics updates (default: PYB)', metavar='', choices=Physics)
-    parser.add_argument('--gui',                default=DEFAULT_GUI,       type=str2bool,      help='Whether to use PyBullet GUI (default: True)', metavar='')
-    parser.add_argument('--record_video',       default=DEFAULT_RECORD_VISION,      type=str2bool,      help='Whether to record a video (default: False)', metavar='')
-    parser.add_argument('--plot',               default=DEFAULT_PLOT,       type=str2bool,      help='Whether to plot the simulation results (default: True)', metavar='')
-    parser.add_argument('--user_debug_gui',     default=DEFAULT_USER_DEBUG_GUI,      type=str2bool,      help='Whether to add debug lines and parameters to the GUI (default: False)', metavar='')
-    parser.add_argument('--obstacles',          default=DEFAULT_OBSTACLES,       type=str2bool,      help='Whether to add obstacles to the environment (default: True)', metavar='')
-    parser.add_argument('--simulation_freq_hz', default=DEFAULT_SIMULATION_FREQ_HZ,        type=int,           help='Simulation frequency in Hz (default: 240)', metavar='')
-    parser.add_argument('--control_freq_hz',    default=DEFAULT_CONTROL_FREQ_HZ,         type=int,           help='Control frequency in Hz (default: 48)', metavar='')
-    parser.add_argument('--duration_sec',       default=DEFAULT_DURATION_SEC,         type=int,           help='Duration of the simulation in seconds (default: 5)', metavar='')
-    parser.add_argument('--output_folder',     default=DEFAULT_OUTPUT_FOLDER, type=str,           help='Folder where to save logs (default: "results")', metavar='')
-    parser.add_argument('--colab',              default=DEFAULT_COLAB, type=bool,           help='Whether example is being run by a notebook (default: "False")', metavar='')
+    parser = argparse.ArgumentParser(description='Trajectory tracking with the geometric controller')
+    parser.add_argument('--traj', default=DEFAULT_TRAJ, type=str, choices=list(TRAJECTORIES),
+                        help=f'Trajectory to track (default: {DEFAULT_TRAJ})')
+    parser.add_argument('--traj_duration', default=None, type=float,
+                        help='Total duration of the trajectory in seconds (default: the default duration of the trajectory)')
+    parser.add_argument('--gui', default=DEFAULT_GUI, type=str2bool, metavar='',
+                        help=f'Whether to use the PyBullet GUI (default: {DEFAULT_GUI})')
+    parser.add_argument('--plot', default=DEFAULT_PLOT, type=str2bool, metavar='',
+                        help=f'Whether to show the figures (default: {DEFAULT_PLOT})')
+    parser.add_argument('--record_video', default=DEFAULT_RECORD_VIDEO, type=str2bool, metavar='',
+                        help=f'Whether to record a video (default: {DEFAULT_RECORD_VIDEO})')
+    parser.add_argument('--output_folder', default=DEFAULT_OUTPUT_FOLDER, type=str, metavar='',
+                        help=f'Folder where the log and figures are saved (default: "{DEFAULT_OUTPUT_FOLDER}")')
     ARGS = parser.parse_args()
 
     run(**vars(ARGS))
