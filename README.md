@@ -4,7 +4,32 @@ In this project, you implement a geometric tracking controller for the Crazyflie
 
 ## Installation
 
-Tested with Python 3.10.
+The project uses Python 3.10 in a conda environment.
+
+### 1. Install conda
+
+Skip this step if `conda --version` already prints a version in your terminal, for example from an existing Anaconda or Miniconda installation.
+
+Otherwise, install [Miniforge](https://github.com/conda-forge/miniforge), a free, minimal conda installer that uses the community conda-forge channel.
+
+**macOS and Linux.** In a terminal, run:
+
+```sh
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh
+```
+
+Accept the license, keep the default install location, and answer `yes` when the installer asks whether to initialize conda. Then close the terminal and open a new one.
+
+**Windows.** Download `Miniforge3-Windows-x86_64.exe` from the [latest Miniforge release](https://github.com/conda-forge/miniforge/releases/latest) and run it with the default options. Then open **Miniforge Prompt** from the Start menu, and run all the commands in this README in it.
+
+Check that conda works:
+
+```sh
+conda --version
+```
+
+### 2. Create the environment and install the simulator
 
 ```sh
 git clone https://github.com/acp-lab/rbe-502-crazyflie-project.git
@@ -13,15 +38,26 @@ cd rbe-502-crazyflie-project
 conda create -n drones python=3.10
 conda activate drones
 
-pip3 install --upgrade pip
-pip3 install -e .   # on Linux, if needed, `sudo apt install build-essential` to build `pybullet`
+python -m pip install --upgrade pip
+python -m pip install -e .
 ```
 
-On macOS, `pip3` builds `pybullet` from source, which takes several minutes. If the build fails with `error: expected identifier or '('` in `_stdio.h` (recent Xcode command line tools), install with:
+If `git` is not installed, download the repository as a ZIP file from GitHub (**Code > Download ZIP**), unzip it, and `cd` into the unzipped folder instead.
 
-```sh
-CFLAGS="-Dfdopen=fdopen" CXXFLAGS="-Dfdopen=fdopen" pip3 install -e .
-```
+Run `conda activate drones` in every new terminal before you work on the project.
+
+### Building `pybullet`
+
+`pip` downloads a prebuilt `pybullet` only on Linux (x86_64). On macOS and Windows, it builds `pybullet` from source, which takes several minutes and needs a C++ compiler:
+
+- **macOS:** install the Xcode command line tools with `xcode-select --install`. If the build fails with `error: expected identifier or '('` in `_stdio.h` (recent Xcode command line tools), install with:
+
+  ```sh
+  CFLAGS="-Dfdopen=fdopen" CXXFLAGS="-Dfdopen=fdopen" python -m pip install -e .
+  ```
+
+- **Windows:** install the [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload, then run `python -m pip install -e .` again.
+- **Linux:** if the build is needed and fails, install a compiler with `sudo apt install build-essential`.
 
 ## What you implement
 
