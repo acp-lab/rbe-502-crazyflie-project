@@ -19,7 +19,6 @@ matplotlib = "^3.7"
 pytest = ">=7.3, <9.0"
 pybullet = "^3.2.5"
 gymnasium = "~=0.28"
-stable-baselines3 = "^2.0.0"
 
 [tool.poetry.dev-dependencies]
 
